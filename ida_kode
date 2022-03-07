@@ -1,0 +1,183 @@
+library(Epi)
+library(popEpi)
+options("popEpi.datatable" = FALSE)
+library(survival)
+
+data(cancer)
+lung$sex <- factor(lung$sex,
+                   levels = 1:2,
+                   labels = c("M", "W"))
+lung$time <- lung$time / (365.25/12)
+head(lung)
+
+km <- survfit(Surv(time, status == 2) ~ 1, data = lung)
+km 
+#median survival is 10.2 months, which means that at 10.2 months half of the patients have died
+
+plot(km)
+
+kms <- survfit(Surv(time, status == 2) ~ sex, data = lung)
+kms
+plot(kms, col = c("blue", "red"), lwd = 1, conf.int = TRUE)
+lines(kms, col = c("blue", "red"), lwd = 3)
+
+c0 <- coxph(Surv(time, status == 2) ~ sex , data = lung)
+c1 <- coxph(Surv(time, status == 2) ~ sex + I(age/10), data = lung)
+summary(c1)
+
+
+p1 <- glm(cbind(status == 2, time) ~ sex + age,
+            family = poisreg,
+            data = lung)
+ci.exp(p1)
+ci.exp(c1) # estimates from Cox
+
+
+px <- glm(status == 2 ~ sex + age + offset(log(time)),
+            family = poisson,
+            data = lung)
+
+ci.exp(px)
+
+
+#Section 1.4
+Ll <- Lexis(exit = list(tfl = time),
+            exit.status = factor(status,
+                                    levels = 1:2,
+                                    labels = c("Alive","Dead")),
+            data = lung)
+head(Ll)
+boxes(Ll, boxpos = TRUE)
+
+cl <- coxph(Surv(tfl, tfl + lex.dur, lex.Xst == "Dead") ~ sex + age,
+            data = Ll)
+cL <- coxph.Lexis(Ll, tfl ~ sex + age)
+ci.exp(cl)
+ci.exp(cL)
+
+
+pc <- glm(cbind(lex.Xst == "Dead", lex.dur) ~ sex + age,
+            family = poisreg,
+            data = Ll)
+
+# or in Lexis 
+pL <- glm.Lexis(Ll, ~ sex + age)
+?glm.Lexis
+
+
+Sl <- splitMulti(Ll, tfl = 0:36)
+
+ps <- glm.Lexis(Sl, ~ Ns(tfl, knots = seq(0, 36, 12)) + sex + age)
+ci.exp(ps)
+
+round(cbind(ci.exp(cl), ci.exp(ps, subset = c("sex","age")), ci.exp(pL, subset = c("sex","age"))), 3)
+
+
+prf <- data.frame(tfl = seq(0, 30, 0.2), 
+                    sex = "W",
+                    age = 60)
+
+
+
+
+
+
+# --------------------------------- Diabites example ----------------------------------------------
+data(DMlate)
+set.seed(1952)
+DMlate <- DMlate[sample(1:nrow(DMlate), 2000),]
+
+Ldm <- Lexis(entry = list(per = dodm,
+                            age = dodm - dobth,
+                            tfd = 0),
+                exit = list(per = dox),
+                exit.status = factor(!is.na(dodth),
+                                        labels = c("DM","Dead")),
+                data = DMlate)
+
+#Then subdivide the follow-up at the date of OAD, using dooad: (instead of deterministic time-points)
+#splits the records in two of persons have experienced OAD
+Cdm <- cutLexis(Ldm,
+                cut = Ldm$dooad,
+                timescale = "per",
+                new.state = "OAD")
+summary(Cdm)
+subset(Cdm, lex.id %in% c(1,2,20))
+subset(Ldm, lex.id %in% c(1,2,20))
+
+#what happens after OAD (doesnt care of OAD to OAD, but how about OAD to Death)
+Adm <- subset(Cdm, lex.Cst == "DM")
+par(mfrow = c(1,2))
+boxes(Adm, boxpos = TRUE, scale.R = 100, show.BE = TRUE)
+boxes(Cdm, boxpos = TRUE, scale.R = 100, show.BE = TRUE)
+#Venstre i kassen er hvor mange der starter i gruppen, højre er hvor mange der besøger der.
+#modellen holder styr på transiente og absorberende tilstande
+transient(Cdm)
+absorbing(Cdm)
+
+
+m3 <- survfit(Surv(tfd, tfd + lex.dur, lex.Xst) ~ 1, id = lex.id, data = Adm)
+names(m3)
+asd<-cbind(m3$time, m3$pstate)
+colnames(asd)<- c("time", m3$states)
+head(asd)
+
+# de sidste to rækker i m3$transitions er selvfølgelig tomme fordi Dead er absorberende og vi har fjernet alle overgange med start i OAD
+par( mfrow=c(1,2) )
+matplot(m3$time, 
+        m3$pstate,
+        type="s", 
+        lty=1, 
+        lwd=4,
+        col=c("#53b9e9","#b688f1","#f38fd5"),
+        xlim=c(0,15), xaxs="i",
+        ylim=c(0,1), yaxs="i" )
+stackedCIF(m3, lwd=3, xlim=c(0,15), xaxs="i", yaxs="i" )
+text( rep(12,3), c(0.9,0.3,0.6), levels(Cdm) )
+
+
+# 2.4 Modeling cause specific rates
+#time-split
+Sdm <- splitMulti(Adm, tfd = seq(0,20,0.1) )
+summary(Adm)
+summary(Sdm)
+
+okn <- c(0,0.5,3,6)
+dkn <- c(0,2.0,5,9)
+OAD.glm <- glm.Lexis(Sdm, ~ Ns(tfd, knots = okn), from = "DM", to = "OAD" )
+Dead.glm <- glm.Lexis(Sdm, ~ Ns(tfd, knots = dkn), from = "DM", to = "Dead")
+
+int <- 0.01
+nd <- data.frame(tfd = seq(0, 15, int))
+l.glm <- ci.pred( OAD.glm, nd)
+m.glm <- ci.pred(Dead.glm, nd)
+
+dev.off()
+matshade(nd$tfd,
+            cbind(l.glm, m.glm) * 100,
+            plot = TRUE,
+            log = "y", ylim = c(2, 20),
+            col = rep(c("red","#dbdf0c"), 2), lwd = 3)
+
+# Cumulative risks from parametric models
+t <- seq(0, 15, 0.01)
+nd <- data.frame(tfd = t)
+
+cR <- ci.Crisk(mods = list(OAD = OAD.glm,
+                        Dead = Dead.glm),
+                nd = nd)
+
+matshade(as.numeric(dimnames(cR$Crisk)[[1]]),
+            cbind(cR$Crisk[,1,],
+            cR$Crisk[,2,],
+            cR$Crisk[,3,]), 
+            plot = TRUE,
+            lwd = 2, 
+            col = c("limegreen","red","black"))
+mat2pol(cR$Crisk[,3:1,1], 
+        col = c("#383bce","#2adf75","black")[3:1])
+matshade(as.numeric(dimnames(cR$Srisk)[[1]]),
+        cbind(cR$Srisk[,1,],
+        cR$Srisk[,2,]), plot = TRUE,
+        lwd = 2, col = c("black","red"),
+        ylim = 0:1, yaxs = "i")
