@@ -2,6 +2,7 @@ library(Epi)
 library(popEpi)
 options("popEpi.datatable" = FALSE)
 library(survival)
+library(tidyverse)
 
 data(cancer)
 lung$sex <- factor(lung$sex,
@@ -181,3 +182,355 @@ matshade(as.numeric(dimnames(cR$Srisk)[[1]]),
         cR$Srisk[,2,]), plot = TRUE,
         lwd = 2, col = c("black","red"),
         ylim = 0:1, yaxs = "i")
+
+
+# --------------------- Steno 2 trial -------------------------------------
+nround <- function(df, dec = 2) {
+        wh.num <- sapply(df, is.numeric)
+        df[,wh.num] <- round(df[,wh.num], dec)
+        print(df)
+        }
+
+data(steno2)
+steno2 <- transform(cal.yr(steno2),
+                    doEnd = ifelse(!is.na(doDth),
+                                   doDth, 
+                                   doEnd))
+
+L2 <- Lexis(entry = list(per = doBase,
+                         age = doBase - doBth,
+                         tfi = 0),
+             exit = list(per = doEnd),
+      exit.status = factor(deathCVD + !is.na(doDth),
+                           labels=c("Mic","D(oth)","D(CVD)")),
+               id = id,
+             data = steno2)
+summary(L2, t = TRUE)
+boxes(L2, boxpos = TRUE, show.BE = TRUE)
+
+data(st2alb)
+cut2 <- rename(cal.yr(st2alb), 
+               lex.id = id,
+                  cut = doTr,
+            new.state = state)
+str(cut2)
+head(cut2)
+
+with(cut2, addmargins(table(table(lex.id))))
+
+L3 <- rcutLexis(L2, cut2, timescale = "per") #cut-car refers to calender time
+#vi nanvngiver cut2 ovenfor fordi rcutLexis har nogle ret stramme krav til navngivning
+summary(L3)
+boxes(L3, boxpos = TRUE, cex = 0.8)
+
+#transistions between Mac and normal makes no sense, so we 'add' a step in Mic
+(jump <-
+subset(L3, (lex.Cst == "Norm" & lex.Xst == "Mac") |
+           (lex.Xst == "Norm" & lex.Cst == "Mac"))[,
+       c("lex.id", "per", "lex.dur","lex.Cst", "lex.Xst")])
+
+# add a mic state uniformly between
+set.seed(1952)
+xcut <- select(transform(jump,
+                          cut = per + lex.dur * runif(per, 0.1, 0.9),
+                         new.state = "Mic"),
+                c(lex.id, cut, new.state))
+xcut
+
+L4 <- rcutLexis(L3, xcut)
+summary(L4)
+clr <- c("forestgreen","orange","red","blue",gray(0.3))
+boxes(L4, boxpos = list(x = c(20,20,20,80,80),
+                        y = c(10,50,90,75,25)),
+        show.BE = "nz",
+        scale.R = 100,
+        digits.R = 2,
+        cex = 0.9,
+        pos.arr = 0.3,
+        col.bg = clr,
+        col.border = clr,
+        col.txt = c("white","black")[c(1,2,1,1,1)])
+
+
+# -------------- Multiple time scales ----------------
+S4 <- splitMulti(L4, tfi = seq(0, 25, 1/2))
+summary(L4)
+summary(S4)
+
+# overall mortality rates as functions of age and duration
+# Den merger dødsårsagerne, fordi data ikke tillader estimation af begge i dette setup
+ma <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                      Ns(age, knots = seq(50, 80, 10)) +
+                      lex.Cst)
+round(ci.exp(ma),2)
+
+# tested whether the three states carry the same mortality
+# test Mac and norm  = 0 on the log scale
+Wald(ma, subset = "lex.Cst")
+
+
+# model the two causes of death seperately, using the glm.Lexis "to" argument
+mo <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                      Ns(age, knots = seq(50, 80, 10)) +
+                      lex.Cst,
+                to = "D(oth)")
+round(ci.exp(mo), 3)
+mC <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                      Ns(age, knots = seq(50, 80, 10)) +
+                      lex.Cst,
+                to = "D(CVD)")
+round(ci.exp(mC), 3)
+
+#test if mortality is the same from all states
+Wald(mo, subset = "Cst") #the same in death from other causes
+Wald(mC, subset = "Cst") #differnt in D(CVD)
+
+
+prf <- transform(expand.grid(tfi = c(NA, seq(0, 20, 0.5)),
+                             ain = c(45, 55, 65))[-1,],
+                 age = ain + tfi,
+             lex.Cst = "Mic")
+head(prf)
+par(mfrow = c(1,1))
+matshade(prf$age, cbind(ci.pred(mo, prf),
+                        ci.pred(mC, prf)) * 100,
+         lwd = 3, col = c("black","blue"),
+         log = "y", ylim = c(0.0001,65), plot = TRUE)
+par(mfrow=c(1,3))
+for(st in c("Norm","Mic","Mac"))
+   { 
+matshade(prf$age, cbind(ci.pred(mo, transform(prf, lex.Cst = st)),
+                        ci.pred(mC, transform(prf, lex.Cst = st))) * 100,
+         lwd = 3, col = c("black","blue"),
+         log = "y", ylim = c(0.1,50), plot = TRUE)    
+text(60, 50, st, adj = 0)
+   }
+
+# ------------- 3.3 - State probabilities ------------------
+#interested in the effect of allocation to intensified or standard treatment
+#interaktion ml. allokation og state og death = other
+mix <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst * allo,
+                 to = "D(oth)")
+round(ci.exp(mix), 3)
+
+# allokation og state inden for states og death = other (der er ikke isoleret effekt af allo)
+mox <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst / allo,
+                 to = "D(oth)")
+
+round(ci.exp(mox), 3)
+c(deviance(mox), deviance(mix))
+
+#interaktion ml. allokation og state og death = CV
+mix <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst * allo,
+                 to = "D(CVD)")
+round(ci.exp(mix), 3)
+
+# allokation og state inden for states og death = CV (der er ikke isoleret effekt af allo)
+mCx <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst / allo,
+                 to = "D(CVD)")
+
+round(ci.exp(mox), 3)
+c(deviance(mox), deviance(mix))
+#Det er de samme modeller - bare forksellig parametrisering
+
+
+#For a complete description of transitions in the model we also need models for the transitions between albuminuria states.
+# detoriation or improvement (pil op pil ned)
+det <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst / allo,
+                 from = c("Norm","Mic"),
+                   to = c("Mic","Mac"))
+imp <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       lex.Cst / allo,
+                 from = c("Mic","Mac"),
+                   to = c("Norm","Mic"))
+round(ci.exp(det), 3)
+round(ci.exp(imp), 3)
+round(ci.exp(det, subset="al"), 1)
+round(ci.exp(imp, subset="al"), 1)
+
+#ONE TRANSISTION Norm to Mic
+nomi <- glm.Lexis(S4, ~ Ns(tfi, knots = seq( 0, 20, 5)) +
+                       Ns(age, knots = seq(50, 80, 10)) +
+                       allo,
+                 from = "Norm",
+                   to = "Mic")
+
+round(ci.exp(nomi), 3)
+
+#create a list of possible transistions. The elements in the list are the transient states. These lists will contain the states you
+#can acess from the transient states and the model that governs the transision. Could also be 'nomi' models (but its not quite the same)
+Tr <- list(Norm = list("Mic" = det,
+                    "D(oth)" = mox,
+                    "D(CVD)" = mCx),
+            Mic = list("Mac" = det,
+                      "Norm" = imp,
+                    "D(oth)" = mox,
+                    "D(CVD)" = mCx),
+            Mac = list("Mic" = imp,
+                    "D(oth)" = mox,
+                    "D(CVD)" = mCx))
+lapply(Tr, names)
+
+#create counterfactual patients to simulate transistion probs
+
+ini <- L2[,c("per", "age", "tfi")]
+ini <- rbind(transform(ini, lex.Cst = "Mic", allo = "Int"),
+             transform(ini, lex.Cst = "Mic", allo = "Conv"))
+str(ini)
+
+
+set.seed(1952)
+system.time(
+Sorg <- simLexis(Tr = Tr,  # models for each transition
+                init = ini, # cohort of straters
+                N = 10,   # how many copies of each person in ini
+                t.range = 20,  # how long should we simulate before censoring
+                n.int = 200))# how many intervals for evaluating rates
+Sorg <- Relevel(Sorg, c("Norm", "Mic", "Mac", "D(CVD)", "D(oth)"))
+str(Sorg)
+summary(Sorg, t = T)
+nround(subset(Sorg, lex.id %in% 28:32), 2)
+# Det virkede så ikke. Prøv fuldstændigt simuleret ini - ikke simuleret på baggrund af steno2
+###################################################
+### code chunk number 38: ms-steno2.rnw:717-728
+###################################################
+#ain og age er det samme
+ini <- S4[1:10,c("lex.id", "per", "age", "tfi", "lex.Cst", "allo")]
+ini[,"lex.id"]  <- 1:10
+ini[,"per"]     <- 1993 # not used but it is a time scale in S4 
+ini[,"age"]     <- 
+ini[,"ain"]     <- rep(seq(45,65,5), 2)
+ini[,"tfi"]     <- 0
+ini[,"lex.Cst"] <- factor("Mic", 
+                          levels = c("Norm","Mic","Mac","D(CVD)","D(oth)"))
+ini[,"allo"]    <- factor(rep(c("Int","Conv"), each = 5))
+ini
+str(ini)
+
+
+###################################################
+### code chunk number 39: ms-steno2.rnw:740-749
+###################################################
+system.time(
+Sdef <- simLexis(Tr = Tr, 
+                init = ini, 
+                N = 100,
+                t.range = 20,
+                n.int = 200))
+# str(Sdef)
+summary(Sdef)
+nround(head(Sdef))
+
+###################################################
+### code chunk number 40: ms-steno2.rnw:757-763
+###################################################
+P45i <- nState(subset(Sdef, ain == 45 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi")
+head(P45i)
+head(pState(P45i))
+
+
+###################################################
+### code chunk number 41: ms-steno2.rnw:767-807
+###################################################
+
+P45c <- pState(nState(subset(Sdef, ain == 45 & allo == "Conv"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P45i <- pState(nState(subset(Sdef, ain == 45 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P50c <- pState(nState(subset(Sdef, ain == 55 & allo == "Conv"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P50i <- pState(nState(subset(Sdef, ain == 55 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P55c <- pState(nState(subset(Sdef, ain == 55 & allo == "Conv"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P55i <- pState(nState(subset(Sdef, ain == 55 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P60c <- pState(nState(subset(Sdef, ain == 55 & allo == "Conv"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P60i <- pState(nState(subset(Sdef, ain == 55 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P65c <- pState(nState(subset(Sdef, ain == 65 & allo == "Conv"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+P65i <- pState(nState(subset(Sdef, ain == 65 & allo == "Int"), 
+               at = seq(0, 20, 0.1), 
+             from = 0, 
+       time.scale = "tfi"))
+
+
+###################################################
+### code chunk number 42: panel5
+###################################################
+par(mfrow = c(5,2), mar = c(1,1,0,0), 
+      oma = c(3,3,1,0), mgp=c(3,1,0)/1.6)
+
+plot(P45i, col = clr, xlim = c(0,20))
+plot(P45c, col = clr, xlim = c(20,0))
+
+plot(P50i, col = clr, xlim = c(0,20))
+plot(P50c, col = clr, xlim = c(20,0))
+
+plot(P55i, col = clr, xlim = c(0,20))
+plot(P55c, col = clr, xlim = c(20,0))
+
+plot(P60i, col = clr, xlim = c(0,20))
+plot(P60c, col = clr, xlim = c(20,0))
+
+plot(P65i, col = clr, xlim = c(0,20))
+plot(P65c, col = clr, xlim = c(20,0))
+
+mtext(c("Int","Conv"), side = 3, at = c(1,3)/4, outer = TRUE, line = 0)
+mtext(paste(seq(45,65,5)), side = 2, at = (5:1*2-1)/10, 
+      outer = TRUE, line = 0)
+
+
+
+# --------------------- WHAAAT - Clinical data?? -----------------------------
+data(st2clin)
+str(st2clin)
+st2clin <- rename(cal.yr(st2clin),
+                  lex.id = id,
+                  per = doV)
+summary(st2clin)
+addmargins(table(table(st2clin$lex.id)))
+
+S5 <- addCov.Lexis(S4, st2clin, "per")
+tt <- table(st2clin$lex.id)
+(who <- names(tt[tt == 3])[1])
+subset(st2clin, lex.id == who)
+nround(subset(S5, 
+              lex.id == who, 
+              select = c(lex.id,per,tfi,tfc,exnam,a1c,chol,crea)))
+timeScales(S5)
+timeSince(S5)
